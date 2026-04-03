@@ -82,7 +82,7 @@ require (
 	github.com/oracle/oci-go-sdk/v65 v65.109.0
 	github.com/urfave/cli/v3 v3.7.0
 	github.com/vercel/terraform-provider-vercel v1.14.1
-	github.com/vultr/govultr/v2 v2.17.2
+	github.com/vultr/govultr/v3 v3.29.0
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
 	golang.org/x/text v0.34.0
 	golang.org/x/time v0.14.0

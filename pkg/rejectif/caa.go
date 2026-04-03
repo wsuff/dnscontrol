@@ -43,6 +43,15 @@ func CaaHasEmptyTarget(rc *models.RecordConfig) error {
 	return nil
 }
 
+// CaaIodefContainsMailto identifies CAA iodef records with mailto: URIs.
+// Some providers reject mailto: values in iodef records.
+func CaaIodefContainsMailto(rc *models.RecordConfig) error {
+	if rc.CaaTag == "iodef" && strings.HasPrefix(rc.GetTargetField(), "mailto:") {
+		return errors.New("caa iodef with mailto: URI is not supported by this provider")
+	}
+	return nil
+}
+
 // // CaaTargetHasSemicolon identifies CAA records that contain semicolons.
 // func CaaTargetHasSemicolon(rc *models.RecordConfig) error {
 // 	if strings.Contains(rc.GetTargetField(), ";") {
