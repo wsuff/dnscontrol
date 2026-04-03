@@ -10,7 +10,7 @@ import (
 	"github.com/StackExchange/dnscontrol/v4/models"
 	"github.com/StackExchange/dnscontrol/v4/pkg/diff2"
 	"github.com/StackExchange/dnscontrol/v4/pkg/providers"
-	"github.com/vultr/govultr/v2"
+	govultr "github.com/vultr/govultr/v3"
 	"golang.org/x/net/idna"
 	"golang.org/x/oauth2"
 )
@@ -71,45 +71,37 @@ func NewProvider(m map[string]string, metadata json.RawMessage) (providers.DNSSe
 	}
 
 	config := &oauth2.Config{}
-
-	client := govultr.NewClient(config.Client(context.Background(), &oauth2.Token{AccessToken: token}))
+	ctx := context.Background()
+	ts := config.TokenSource(ctx, &oauth2.Token{AccessToken: token})
+	client := govultr.NewClient(oauth2.NewClient(ctx, ts))
 	client.SetUserAgent("dnscontrol")
 
-	_, err := client.Account.Get(context.Background())
+	_, _, err := client.Account.Get(ctx)
 	return &vultrProvider{client, token}, err
 }
 
 // GetZoneRecords gets the records of a zone and returns them in RecordConfig format.
 func (api *vultrProvider) GetZoneRecords(dc *models.DomainConfig) (models.Records, error) {
 	domain := dc.Name
-
 	listOptions := &govultr.ListOptions{}
-	records, recordsMeta, err := api.client.DomainRecord.List(context.Background(), domain, listOptions)
-	curRecords := make(models.Records, recordsMeta.Total)
-	nextI := 0
+	var curRecords models.Records
 
 	for {
+		records, meta, _, err := api.client.DomainRecord.List(context.Background(), domain, listOptions)
 		if err != nil {
 			return nil, err
 		}
-		currentI := 0
-		for i, record := range records {
+		for _, record := range records {
 			r, err := toRecordConfig(domain, record)
 			if err != nil {
 				return nil, err
 			}
-			curRecords[nextI+i] = r
-			currentI = nextI + i
+			curRecords = append(curRecords, r)
 		}
-		nextI = currentI + 1
-
-		if recordsMeta.Links.Next == "" {
+		if meta.Links.Next == "" {
 			break
-		} else {
-			listOptions.Cursor = recordsMeta.Links.Next
-			records, recordsMeta, err = api.client.DomainRecord.List(context.Background(), domain, listOptions)
-			continue
 		}
+		listOptions.Cursor = meta.Links.Next
 	}
 
 	return curRecords, nil
@@ -146,19 +138,22 @@ func (api *vultrProvider) GetZoneRecordsCorrections(dc *models.DomainConfig, cur
 			corrections = append(corrections, &models.Correction{Msg: change.MsgsJoined})
 		case diff2.CREATE:
 			r := toVultrRecord(change.New[0], "0")
+			priority := r.Priority
 			corrections = append(corrections, &models.Correction{
 				Msg: change.Msgs[0],
 				F: func() error {
-					_, err := api.client.DomainRecord.Create(context.Background(), dc.Name, &govultr.DomainRecordReq{Name: r.Name, Type: r.Type, Data: r.Data, TTL: r.TTL, Priority: &r.Priority})
+					_, _, err := api.client.DomainRecord.Create(context.Background(), dc.Name, &govultr.DomainRecordCreateReq{Name: r.Name, Type: r.Type, Data: r.Data, TTL: r.TTL, Priority: &priority})
 					return err
 				},
 			})
 		case diff2.CHANGE:
 			r := toVultrRecord(change.New[0], change.Old[0].Original.(govultr.DomainRecord).ID)
+			name := r.Name
+			priority := r.Priority
 			corrections = append(corrections, &models.Correction{
 				Msg: fmt.Sprintf("%s; Vultr RecordID: %v", change.Msgs[0], r.ID),
 				F: func() error {
-					return api.client.DomainRecord.Update(context.Background(), dc.Name, r.ID, &govultr.DomainRecordReq{Name: r.Name, Type: r.Type, Data: r.Data, TTL: r.TTL, Priority: &r.Priority})
+					return api.client.DomainRecord.Update(context.Background(), dc.Name, r.ID, &govultr.DomainRecordUpdateReq{Name: &name, Type: r.Type, Data: r.Data, TTL: r.TTL, Priority: &priority})
 				},
 			})
 		case diff2.DELETE:
@@ -182,6 +177,26 @@ func (api *vultrProvider) GetNameservers(domain string) ([]*models.Nameserver, e
 	return models.ToNameservers(defaultNS)
 }
 
+// ListZones returns the list of zones (domains) in this Vultr account.
+func (api *vultrProvider) ListZones() ([]string, error) {
+	var zones []string
+	listOptions := &govultr.ListOptions{}
+	for {
+		domains, meta, _, err := api.client.Domain.List(context.Background(), listOptions)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range domains {
+			zones = append(zones, d.Domain)
+		}
+		if meta.Links.Next == "" {
+			break
+		}
+		listOptions.Cursor = meta.Links.Next
+	}
+	return zones, nil
+}
+
 // EnsureZoneExists creates a zone if it does not exist.
 func (api *vultrProvider) EnsureZoneExists(domain string, metadata map[string]string) error {
 	if ok, err := api.isDomainInAccount(domain); err != nil {
@@ -191,15 +206,15 @@ func (api *vultrProvider) EnsureZoneExists(domain string, metadata map[string]st
 	}
 
 	// Vultr requires an initial IP, use a dummy one.
-	_, err := api.client.Domain.Create(context.Background(), &govultr.DomainReq{Domain: domain, IP: "0.0.0.0", DNSSec: "disabled"})
+	_, _, err := api.client.Domain.Create(context.Background(), &govultr.DomainReq{Domain: domain, IP: "0.0.0.0", DNSSec: "disabled"})
 	return err
 }
 
 func (api *vultrProvider) isDomainInAccount(domain string) (bool, error) {
 	listOptions := &govultr.ListOptions{}
-	domains, meta, err := api.client.Domain.List(context.Background(), listOptions)
 
 	for {
+		domains, meta, _, err := api.client.Domain.List(context.Background(), listOptions)
 		if err != nil {
 			return false, err
 		}
@@ -212,11 +227,8 @@ func (api *vultrProvider) isDomainInAccount(domain string) (bool, error) {
 
 		if meta.Links.Next == "" {
 			break
-		} else {
-			listOptions.Cursor = meta.Links.Next
-			domains, meta, err = api.client.Domain.List(context.Background(), listOptions)
-			continue
 		}
+		listOptions.Cursor = meta.Links.Next
 	}
 	return false, nil
 }
@@ -278,7 +290,7 @@ func toRecordConfig(domain string, r govultr.DomainRecord) (*models.RecordConfig
 	}
 }
 
-// toVultrRecord converts a RecordConfig converted by toRecordConfig back to a Vultr DomainRecordReq. #rtype_variations.
+// toVultrRecord converts a RecordConfig converted by toRecordConfig back to a Vultr DomainRecord. #rtype_variations.
 func toVultrRecord(rc *models.RecordConfig, vultrID string) *govultr.DomainRecord {
 	name := rc.GetLabel()
 	// Vultr uses a blank string to represent the apex domain.

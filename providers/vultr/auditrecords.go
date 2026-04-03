@@ -18,6 +18,7 @@ func AuditRecords(records []*models.RecordConfig) []error {
 	// the provider doesn't support double quotes.
 
 	a.Add("CAA", rejectif.CaaTargetContainsWhitespace) // Last verified 2023-01-19
+	a.Add("CAA", rejectif.CaaIodefContainsMailto)     // Vultr API rejects mailto: in iodef records
 
 	return a.Audit(records)
 }
